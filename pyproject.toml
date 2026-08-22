@@ -1,0 +1,13 @@
+[project]
+name = "dtrace-to-pcap"
+version = "1.0.0"
+description = "Converts dtrace.txt files produced by a Fritz!Box or similar into pcap files."
+readme = "README.md"
+authors = [
+    { name = "Vincent Schmandt", email = "vincent@schmandt.eu" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pwntools>=4.15.0",
+    "scapy>=2.7.0",
+]
