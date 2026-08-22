@@ -388,12 +388,14 @@ name = "dtrace-to-pcap"
 version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "colorama" },
     { name = "pwntools" },
     { name = "scapy" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "colorama", specifier = ">=0.4.6" },
     { name = "pwntools", specifier = ">=4.15.0" },
     { name = "scapy", specifier = ">=2.7.0" },
 ]

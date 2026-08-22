@@ -7,6 +7,7 @@ from scapy.all import Raw, wrpcap, wireshark
 from scapy.layers.l2 import Ether
 
 from pwn import hexdump
+from colorama import Fore, Back, Style
 
 from typing import Callable, List
 
@@ -134,9 +135,16 @@ def main() -> int:
             def indent_lines(text: str, indentation: int):
                 return "".join([" " * indentation + l for l in text.splitlines(keepends=True)])
 
-            print(packet_header)
+            packet_direction_color = Fore.BLUE if packet_direction == ">" else Fore.GREEN
+            colored_parties = packet_direction_color + packet_direction.join(packet_parties) + Fore.RESET
+            print(colored_parties, packet_layer, Style.DIM + packet_unknown_1, packet_timestamp, Style.RESET_ALL)
             print(indent_lines(hexdump(packet_raw), 2) + "\n")
-            print(indent_lines(packet_interpretation, 2) + "\n")
+
+            print_packet_interpretation = packet_interpretation
+            print_packet_interpretation = print_packet_interpretation.replace("[", "[" + Fore.YELLOW)
+            print_packet_interpretation = print_packet_interpretation.replace("]", Fore.RESET + "]")
+
+            print(indent_lines(print_packet_interpretation, 2) + "\n")
 
         # only process DLC, NWK are always contained in DLC i think
         if packet_layer not in ["DLC"]:
