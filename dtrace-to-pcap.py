@@ -21,11 +21,12 @@ def main() -> int:
     parser.add_argument("filename")
     parser.add_argument("-o", "--output-filename")
     parser.add_argument("-w", "--open-in-wireshark", action="store_true")
+    parser.add_argument("--print-mac", action="store_true")
+    parser.add_argument("--print-dlc", action="store_true")
     parser.add_argument("--print-nwk", action="store_true")
-    parser.add_argument("--print-dlc-nwk", action="store_true")
     args = parser.parse_args()
 
-    if not any([args.output_filename, args.open_in_wireshark, args.print_nwk, args.print_dlc_nwk]):
+    if not any([args.output_filename, args.open_in_wireshark, args.print_mac, args.print_dlc, args.print_nwk]):
         print("No action specified!")
         parser.print_help()
         return 1
@@ -101,6 +102,7 @@ def main() -> int:
         packet_header = packet[0]
 
         # ignore whatever this is for now
+        # TODO: figure out what this is and whether it is important
         if packet_header.startswith("Controller"):
             continue
 
@@ -110,6 +112,8 @@ def main() -> int:
         packet_unknown_2 = " ".join(packet_unknown_2)
         assert packet_direction in ["<", ">"], packet_header
         assert all(map(lambda x: x in ["F0", "F1", "P0", "P1"], packet_parties)), packet_parties
+        assert packet_parties[0].startswith("F"), "first party is expected to be fixed"
+        assert packet_parties[1].startswith("P"), "second party is expected to be portable"
         assert packet_layer in ["DLC", "MAC_C", "NWL"], packet_layer
         assert packet_unknown_2 in ["- FP", "- Rep"], packet_unknown_2
 
@@ -130,59 +134,66 @@ def main() -> int:
         assert packet_raw_len == len(packet_raw), f"{packet_raw_len} != {len(packet_raw)}"
         packet_interpretation = "\n".join(packet_interpretation)
 
-        # only print NWK
-        if packet_layer == "NWL" and args.print_nwk:
+        # print if requested
+        if (packet_layer == "NWL" and args.print_nwk) or (packet_layer == "DLC" and args.print_dlc) or (packet_layer == "MAC_C" and args.print_mac):
             def indent_lines(text: str, indentation: int):
                 return "".join([" " * indentation + l for l in text.splitlines(keepends=True)])
 
-            packet_direction_color = Fore.BLUE if packet_direction == ">" else Fore.GREEN
-            colored_parties = packet_direction_color + packet_direction.join(packet_parties) + Fore.RESET
-            print(colored_parties, packet_layer, Style.DIM + packet_unknown_1, packet_timestamp, Style.RESET_ALL)
-            print(indent_lines(hexdump(packet_raw), 2) + "\n")
-
+            print_parties = packet_direction.join(packet_parties)
+            print_parties = (Fore.BLUE + print_parties if packet_direction == ">" else Fore.GREEN + print_parties) + Fore.RESET
             print_packet_interpretation = packet_interpretation
             print_packet_interpretation = print_packet_interpretation.replace("[", "[" + Fore.YELLOW)
             print_packet_interpretation = print_packet_interpretation.replace("]", Fore.RESET + "]")
 
-            print(indent_lines(print_packet_interpretation, 2) + "\n")
+            packet_layer_bgs = { "DLC": Back.LIGHTGREEN_EX, "NWL": Back.LIGHTYELLOW_EX, "MAC_C": Back.LIGHTCYAN_EX }
+            print_packet_layer = Fore.RED + packet_layer_bgs[packet_layer] + packet_layer + Style.RESET_ALL
 
-        # only process DLC, NWK are always contained in DLC i think
-        if packet_layer not in ["DLC"]:
-            continue
+            print(print_parties, print_packet_layer, Style.DIM + packet_unknown_1, packet_timestamp, packet_unknown_2, Style.RESET_ALL)
+            print(indent_lines(hexdump(packet_raw, total=False), 2) + "\n")
+            print(indent_lines(print_packet_interpretation, 2) + "\n", Style.RESET_ALL)
 
-        # only DLC information frames with address 0x11 or 0x13
-        assert packet_layer == "DLC"
-        control_field = packet_raw[1]
-        addr_field = packet_raw[0]
-
-        frame_type = control_field & 0b0000_0001
-        if frame_type == 1 or addr_field not in [0x11, 0x13]:
-            continue
-
-        if args.print_dlc_nwk:
-            print(packet_direction.join(packet_parties), packet_layer, "->", packet_hexdump)
-
-        scapy_packet_payload = Raw(packet_raw)
         mac1 = "42:42:42:11:11:11"
         mac2 = "42:42:42:22:22:22"
         src_mac = mac1 if packet_direction == ">" else mac2
         dst_mac = mac1 if packet_direction == "<" else mac2
 
-        assert packet_raw_len < 0xff
-        LC = 0x79
-        LC_DATA_REQ = 0x05
-        LC_DATA_IND = 0x06
-        lc_data_kind = LC_DATA_IND if packet_direction == ">" else LC_DATA_REQ # TODO: direction may be reversed
-        mcei = 0x00 # ??
-        subfield = 0x00 # ???, B0 (0x00) or B1 (0x10)
-        scapy_packet_mitel = Raw(bytearray([0x03, 0x01, 0x00, packet_raw_len + 5])) / Raw(bytearray([LC, lc_data_kind, mcei, subfield, packet_raw_len]))
-        scapy_packets.append(Ether(src=src_mac, dst=dst_mac, type="RAW_FR") / scapy_packet_mitel / scapy_packet_payload)
+        # TODO: for all layers: correct timestamps / offsets in pcap / wireshark
+
+        # skip NWK, it is contained in DLC frames anyways and would only cause chaos / duplicates
+        if packet_layer == "NWK":
+            continue
+
+        # TODO: correctly include MAC_C if possible, it is unclear how much of that can be put into DECToE frames
+        # for now just put it as RAW so it is there
+        if packet_layer == "MAC_C":
+            scapy_packet_mitel = Raw(bytearray([0x03, 0x01, 0x00, len(packet_raw)]))
+            scapy_packets.append(Ether(src=src_mac, dst=dst_mac, type="LOOP") / scapy_packet_mitel / Raw(packet_raw))
+            continue
+
+        if packet_layer == "DLC":
+            # strip checksum and fill-0xf0 from the end, they are not supported by DECToE in Wireshark
+            packet_raw = packet_raw[:-2]
+            while packet_raw[-1] == 0xf0:
+                packet_raw = packet_raw[:-1]
+
+            assert len(packet_raw) < 0xff
+            LC = 0x79
+            LC_DATA_REQ = 0x05
+            LC_DATA_IND = 0x06
+            B0 = 0x00
+            B1 = 0x10
+            lc_data_kind = LC_DATA_REQ if packet_direction == ">" else LC_DATA_IND
+            subfield = B1 if packet_direction == ">" else B0
+            # TODO: MAC Connection Endpoint Identification, if relevant / applicable? maybe related to packet_unknown_1?
+            mcei = 0x00
+            scapy_packet_mitel = Raw(bytearray([0x03, 0x01, 0x00, len(packet_raw) + 5])) / Raw(bytearray([LC, lc_data_kind, mcei, subfield, len(packet_raw)]))
+            scapy_packets.append(Ether(src=src_mac, dst=dst_mac, type="RAW_FR") / scapy_packet_mitel / Raw(packet_raw))
 
     if args.output_filename:
         wrpcap(args.output_filename, scapy_packets)
 
     if args.open_in_wireshark:
-        wireshark(scapy_packets)
+        wireshark(scapy_packets, quiet=True)
 
     return 0
 
