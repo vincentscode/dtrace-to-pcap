@@ -1,5 +1,7 @@
 import argparse
+import sys
 import warnings
+import datetime
 
 warnings.filterwarnings("ignore")
 
@@ -24,6 +26,7 @@ def main() -> int:
     parser.add_argument("--print-mac", action="store_true")
     parser.add_argument("--print-dlc", action="store_true")
     parser.add_argument("--print-nwk", action="store_true")
+    parser.add_argument("--no-warnings", action="store_true")
     args = parser.parse_args()
 
     if not any([args.output_filename, args.open_in_wireshark, args.print_mac, args.print_dlc, args.print_nwk]):
@@ -63,7 +66,9 @@ def main() -> int:
     trace_header_delimiter = "===================|======="
     for _ in range(2):
         consume_expected_line(metadata_delimiter)
-        consume_lines_until(lambda l: l == metadata_delimiter)
+        metadata = consume_lines_until(lambda l: l == metadata_delimiter)[:-1]
+        assert metadata[0].startswith("dtrace"), "does not seem to be a dtrace file"
+
         consume_expected_line("")
         trace_header = consume_line()
         assert trace_header is not None, "unexpected eof"
@@ -86,8 +91,6 @@ def main() -> int:
             break
 
         indentation = get_indentation(l)
-        assert indentation in parties_indentation, indentation
-
         packet = [l[indentation:]]
         while True:
             l = consume_line()
@@ -98,13 +101,21 @@ def main() -> int:
             assert l.startswith(" " * indentation)
             packet.append(l[indentation:])
 
+        # there are controller blocks
+        # they only appear sometimes and may appear unaligned
+        # seems to be related to actual speech data etc.
+        # we ignore them for now
+        # TODO: figure out what this is and whether it is important
+        if packet[0].startswith("Controller"):
+            if not args.no_warnings:
+                print(f"{Fore.YELLOW}WARNING{Fore.RESET}: ignoring Controller block", file=sys.stderr)
+                print(" > " + "\n > ".join(packet), file=sys.stderr)
+            continue
+
+        assert indentation in parties_indentation, f"Expected indentation of line \"{l}\" ({indentation}) to be one of {parties_indentation}"
+
         # line 0 - packet header
         packet_header = packet[0]
-
-        # ignore whatever this is for now
-        # TODO: figure out what this is and whether it is important
-        if packet_header.startswith("Controller"):
-            continue
 
         packet_parties, packet_layer, packet_unknown_1, packet_timestamp, *packet_unknown_2 = packet_header.split(" ")
         packet_direction = packet_parties[2]
@@ -116,6 +127,9 @@ def main() -> int:
         assert packet_parties[1].startswith("P"), "second party is expected to be portable"
         assert packet_layer in ["DLC", "MAC_C", "NWL"], packet_layer
         assert packet_unknown_2 in ["- FP", "- Rep"], packet_unknown_2
+
+        packet_timestamp_hours, packet_timestamp_minutes, packet_timestamp_seconds, packet_timestamp_hundredths = map(int, packet_timestamp.split(":"))
+        scapy_packet_time_seconds = (packet_timestamp_hours * 60 * 60) + (packet_timestamp_minutes * 60) + (packet_timestamp_seconds) + (packet_timestamp_hundredths / 100)
 
         # line 1..n - packet hexdump
         # line n+1..end - interpretation
@@ -157,20 +171,20 @@ def main() -> int:
         src_mac = mac1 if packet_direction == ">" else mac2
         dst_mac = mac1 if packet_direction == "<" else mac2
 
-        # TODO: for all layers: correct timestamps / offsets in pcap / wireshark
-
-        # skip NWK, it is contained in DLC frames anyways and would only cause chaos / duplicates
-        if packet_layer == "NWK":
+        # skip NWL, it is contained in DLC frames anyways and would only cause chaos / duplicates
+        if packet_layer == "NWL":
             continue
 
         # TODO: correctly include MAC_C if possible, it is unclear how much of that can be put into DECToE frames
         # for now just put it as RAW so it is there
-        if packet_layer == "MAC_C":
+        elif packet_layer == "MAC_C":
             scapy_packet_mitel = Raw(bytearray([0x03, 0x01, 0x00, len(packet_raw)]))
-            scapy_packets.append(Ether(src=src_mac, dst=dst_mac, type="LOOP") / scapy_packet_mitel / Raw(packet_raw))
+            scapy_packet = Ether(src=src_mac, dst=dst_mac, type="LOOP") / scapy_packet_mitel / Raw(packet_raw)
+            scapy_packet.time = scapy_packet_time_seconds
+            scapy_packets.append(scapy_packet)
             continue
 
-        if packet_layer == "DLC":
+        elif packet_layer == "DLC":
             # strip checksum and fill-0xf0 from the end, they are not supported by DECToE in Wireshark
             packet_raw = packet_raw[:-2]
             while packet_raw[-1] == 0xf0:
@@ -187,7 +201,12 @@ def main() -> int:
             # TODO: MAC Connection Endpoint Identification, if relevant / applicable? maybe related to packet_unknown_1?
             mcei = 0x00
             scapy_packet_mitel = Raw(bytearray([0x03, 0x01, 0x00, len(packet_raw) + 5])) / Raw(bytearray([LC, lc_data_kind, mcei, subfield, len(packet_raw)]))
-            scapy_packets.append(Ether(src=src_mac, dst=dst_mac, type="RAW_FR") / scapy_packet_mitel / Raw(packet_raw))
+            scapy_packet = Ether(src=src_mac, dst=dst_mac, type="RAW_FR") / scapy_packet_mitel / Raw(packet_raw)
+            scapy_packet.time = scapy_packet_time_seconds
+            scapy_packets.append(scapy_packet)
+
+        else:
+            assert False, f"unknown packet layer: {packet_layer}, should be unreachable due to earlier assert"
 
     if args.output_filename:
         wrpcap(args.output_filename, scapy_packets)
