@@ -8,7 +8,7 @@ cryptography==50.0.0
 idna==3.19
 intervaltree==3.2.1
 invoke==3.0.3
-mako==1.4.1
+mako==1.4.2
 markupsafe==3.0.3
 packaging==26.3
 paramiko==5.0.0
